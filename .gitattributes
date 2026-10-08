@@ -1,0 +1,7 @@
+# Todo el texto con fin de línea LF, aunque se clone en Windows (los contenedores son Linux)
+* text=auto eol=lf
+
+*.docx binary
+*.pptx binary
+*.pdf binary
+*.png binary
