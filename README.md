@@ -11,5 +11,6 @@ TicketStar es un servicio de venta de entradas que se le ofrece a teatros, clube
 | Entrega | Tag | Documentación |
 |---|---|---|
 | 0. Plan del proyecto | `v0-plan` | [docs/entrega-0](docs/entrega-0) |
+| 1. Propuesta de arquitectura (4+1) | `v1-propuesta` | [docs/entrega-1](docs/entrega-1) |
 
 Por ahora el repo tiene solo la documentación. El código arranca en la Entrega 2.
