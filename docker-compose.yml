@@ -1,0 +1,79 @@
+# TicketStar: todo nuestro sistema corriendo en contenedores separados.
+#
+#   docker compose up -d --build     levanta todo
+#   docker compose ps                muestra qué está corriendo
+#   docker compose stop eventos      apaga un solo servicio (el resto sigue)
+#
+# El sitio de prueba del cliente NO está acá: corre en su propio compose
+# (clientes-demo/teatro-avenida), como si fuera el sistema de otra empresa.
+
+name: ticketstar
+
+services:
+  # Lo único que se ve desde afuera. Resuelve el cliente por el subdominio.
+  gateway:
+    image: nginx:1.28-alpine
+    ports:
+      - "${PUERTO_GATEWAY:-80}:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      interna: {}
+      publica:
+        # Con estos nombres lo encuentran los sistemas de los clientes
+        aliases:
+          - teatro-avenida.ticketstar.localhost
+          - club-atletico.ticketstar.localhost
+    restart: unless-stopped
+
+  # Cartelera de cada cliente: eventos y funciones.
+  eventos:
+    build: ./servicios/eventos
+    environment:
+      DATABASE_URL: postgresql://ticketstar:ticketstar@postgres:5432/ticketstar
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - interna
+    restart: unless-stopped
+
+  # Sesiones de compra y checkout (más adelante: reservas y órdenes).
+  ordenes:
+    build: ./servicios/ordenes
+    environment:
+      DATABASE_URL: postgresql://ticketstar:ticketstar@postgres:5432/ticketstar
+      URL_PUBLICA: "http://{cliente}.ticketstar.localhost:${PUERTO_GATEWAY:-80}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - interna
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ticketstar
+      POSTGRES_PASSWORD: ticketstar
+      POSTGRES_DB: ticketstar
+    volumes:
+      - datos-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketstar -d ticketstar"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      - interna
+    restart: unless-stopped
+
+networks:
+  # Red privada: acá se hablan nuestros servicios. Desde afuera no se ve.
+  interna: {}
+  # Red "pública": la usan los sistemas de los clientes para llegar al gateway.
+  publica:
+    name: ticketstar-publica
+
+volumes:
+  datos-postgres: {}

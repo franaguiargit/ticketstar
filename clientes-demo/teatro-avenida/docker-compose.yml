@@ -1,0 +1,25 @@
+# Sitio de prueba del Teatro Avenida.
+#
+# Corre aparte de TicketStar, como si fuera el sistema de otra empresa. Sólo
+# comparte con nosotros la red "ticketstar-publica", por donde llega al gateway.
+# Antes hay que levantar TicketStar, que es el que crea esa red.
+#
+#   docker compose up -d --build     y después abrir http://localhost:3001
+
+name: teatro-avenida
+
+services:
+  web:
+    build: .
+    ports:
+      - "3001:3000"
+    environment:
+      TICKETSTAR_API: http://teatro-avenida.ticketstar.localhost
+      URL_SITIO: http://localhost:3001
+    networks:
+      - ticketstar-publica
+    restart: unless-stopped
+
+networks:
+  ticketstar-publica:
+    external: true
