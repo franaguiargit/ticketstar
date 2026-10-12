@@ -3,6 +3,9 @@
 Maneja la cartelera de cada cliente: los eventos y sus funciones.
 Todo lo que devuelve está filtrado por cliente. El cliente no lo elige quien
 llama: lo saca el gateway del subdominio y nos llega en el header X-Cliente.
+
+Las rutas /v1 son las que publica el gateway. Las /interno son para nuestros
+otros servicios, que nos llaman directo por la red interna.
 """
 import socket
 from contextlib import asynccontextmanager
@@ -22,7 +25,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="TicketStar - eventos", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="TicketStar - eventos", version="0.3.0", lifespan=lifespan)
 
 
 @app.exception_handler(psycopg.OperationalError)
@@ -88,3 +91,23 @@ def ver_evento(evento_id: int, x_cliente: str | None = Header(default=None)):
             (evento_id,),
         ).fetchall()
     return evento
+
+
+@app.get("/interno/funciones/{funcion_id}")
+def ver_funcion(funcion_id: int, x_cliente: str | None = Header(default=None)):
+    """La usa el servicio de órdenes para saber cómo es la sala de una función y armar sus butacas."""
+    cliente = cliente_del_pedido(x_cliente)
+    with conectar() as conn:
+        funcion = conn.execute(
+            "SELECT f.id, f.fecha, f.capacidad, e.id AS evento_id, e.nombre AS evento, e.lugar "
+            "FROM funciones f JOIN eventos e ON e.id = f.evento_id "
+            "WHERE f.id = %s AND e.cliente = %s",
+            (funcion_id, cliente),
+        ).fetchone()
+        if funcion is None:
+            raise HTTPException(404, "No existe esa función")
+        funcion["sectores"] = conn.execute(
+            "SELECT nombre, filas, butacas_por_fila, precio FROM sectores WHERE evento_id = %s ORDER BY id",
+            (funcion["evento_id"],),
+        ).fetchall()
+    return funcion

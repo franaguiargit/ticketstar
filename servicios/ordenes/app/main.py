@@ -1,8 +1,11 @@
 """Servicio de órdenes de TicketStar.
 
-En esta entrega maneja las sesiones de compra: el sistema del cliente abre una
-sesión en nombre de uno de sus usuarios y nosotros le devolvemos la URL de
-nuestro checkout. Las reservas de butacas y las órdenes llegan en la Entrega 3.
+Maneja la compra: las sesiones que abre el sistema del cliente en nombre de sus
+usuarios, la reserva de butacas, la confirmación y nuestra página de checkout.
+
+Habla con los otros servicios de dos formas:
+- síncrona: le pide por REST a eventos cómo es la sala de una función (cartelera.py)
+- asíncrona: deja en RabbitMQ el aviso de cada orden confirmada (mensajes.py)
 """
 import os
 import socket
@@ -11,54 +14,54 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import psycopg
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from .base import conectar, esperar_base
-from .checkout import pagina_checkout
+from . import mensajes, reservas
+from .base import conectar, crear_tablas, esperar_base
+from .cartelera import CarteleraNoDisponible
+from .checkout import NOMBRES, pagina_checkout
 
 DURACION_SESION = timedelta(minutes=15)
 
 # Dirección pública de cada cliente. {cliente} se reemplaza por el subdominio.
 URL_PUBLICA = os.environ.get("URL_PUBLICA", "http://{cliente}.ticketstar.localhost")
 
-TABLAS = """
-CREATE SCHEMA IF NOT EXISTS ordenes;
-
-CREATE TABLE IF NOT EXISTS ordenes.sesiones (
-    id              UUID PRIMARY KEY,
-    cliente         TEXT NOT NULL,
-    usuario_externo TEXT NOT NULL,
-    email           TEXT,
-    evento_id       INT,
-    url_retorno     TEXT,
-    creada          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    vence           TIMESTAMPTZ NOT NULL
-);
-"""
-
-
-def crear_tablas():
-    with conectar() as conn:
-        conn.execute("SELECT pg_advisory_xact_lock(1002)")
-        conn.execute(TABLAS)
+# Para ver qué instancia atendió cada pedido cuando hay más de una
+INSTANCIA = os.environ.get("INSTANCIA") or socket.gethostname()
 
 
 @asynccontextmanager
 async def lifespan(app):
     esperar_base()
     crear_tablas()
+    detener = mensajes.arrancar_publicador()
+    if reservas.SIN_CONTROL:
+        print("OJO: RESERVA_SIN_CONTROL=1, la reserva NO está protegida (solo para la demo)", flush=True)
     yield
+    detener.set()
 
 
-app = FastAPI(title="TicketStar - ordenes", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="TicketStar - ordenes", version="0.3.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def marcar_instancia(request, call_next):
+    respuesta = await call_next(request)
+    respuesta.headers["X-Instancia"] = INSTANCIA
+    return respuesta
 
 
 @app.exception_handler(psycopg.OperationalError)
 async def base_caida(request, exc):
     # Si se cae Postgres, el servicio sigue vivo y avisa en vez de tirar un error 500
     return JSONResponse(status_code=503, content={"detail": "La base de datos no está disponible en este momento"})
+
+
+@app.exception_handler(CarteleraNoDisponible)
+async def cartelera_caida(request, exc):
+    return JSONResponse(status_code=503, content={"detail": "No pudimos consultar la cartelera en este momento"})
 
 
 class NuevaSesion(BaseModel):
@@ -68,6 +71,13 @@ class NuevaSesion(BaseModel):
     evento_id: int | None = None
     url_retorno: str | None = Field(default=None, max_length=500,
                                     description="A dónde mandamos a la persona cuando termina")
+
+
+class NuevaReserva(BaseModel):
+    sesion_id: uuid.UUID
+    funcion_id: int
+    butacas: list[str] = Field(min_length=1, max_length=reservas.MAX_BUTACAS,
+                               description="Los códigos de las butacas, por ejemplo Platea-C-7")
 
 
 def cliente_del_pedido(x_cliente):
@@ -93,9 +103,11 @@ def salud():
             conn.execute("SELECT 1")
     except psycopg.OperationalError:
         base = "sin conexion"
-    return {"servicio": "ordenes", "estado": "ok", "base": base, "instancia": socket.gethostname()}
+    return {"servicio": "ordenes", "estado": "ok", "base": base, "cola": mensajes.estado["cola"],
+            "instancia": INSTANCIA}
 
 
+# --------------------------------------------------------------------------- sesiones de compra
 @app.post("/v1/sesiones", status_code=201)
 def abrir_sesion(datos: NuevaSesion, x_cliente: str | None = Header(default=None)):
     cliente = cliente_del_pedido(x_cliente)
@@ -128,10 +140,62 @@ def ver_sesion(sesion_id: uuid.UUID, x_cliente: str | None = Header(default=None
     return sesion
 
 
+# --------------------------------------------------------------------------- butacas y reservas
+@app.get("/v1/funciones/{funcion_id}/butacas")
+def ver_butacas(funcion_id: int, x_cliente: str | None = Header(default=None)):
+    cliente = cliente_del_pedido(x_cliente)
+    funcion = reservas.buscar_funcion(cliente, funcion_id)
+    del funcion["cliente"]
+    return {"funcion": funcion, "butacas": reservas.mapa_de_butacas(funcion_id)}
+
+
+@app.post("/v1/reservas", status_code=201)
+def reservar(datos: NuevaReserva, x_cliente: str | None = Header(default=None)):
+    cliente = cliente_del_pedido(x_cliente)
+    sesion = buscar_sesion(datos.sesion_id, cliente)
+    if sesion is None:
+        raise HTTPException(404, "No existe esa sesión")
+    if sesion["vence"] < datetime.now(timezone.utc):
+        raise HTTPException(409, "La sesión de compra venció. Hay que empezar de nuevo desde el sitio")
+    reservas.buscar_funcion(cliente, datos.funcion_id)
+    return reservas.reservar(cliente, datos.sesion_id, datos.funcion_id, sorted(set(datos.butacas)))
+
+
+@app.get("/v1/reservas/{reserva_id}")
+def ver_reserva(reserva_id: uuid.UUID, x_cliente: str | None = Header(default=None)):
+    return reservas.buscar_reserva(cliente_del_pedido(x_cliente), reserva_id)
+
+
+@app.delete("/v1/reservas/{reserva_id}", status_code=204)
+def cancelar_reserva(reserva_id: uuid.UUID, x_cliente: str | None = Header(default=None)):
+    reservas.cancelar(cliente_del_pedido(x_cliente), reserva_id)
+    return Response(status_code=204)
+
+
+@app.post("/v1/reservas/{reserva_id}/confirmar")
+def confirmar_reserva(reserva_id: uuid.UUID, x_cliente: str | None = Header(default=None)):
+    cliente = cliente_del_pedido(x_cliente)
+    return reservas.confirmar(cliente, NOMBRES.get(cliente, cliente), reserva_id)
+
+
+# --------------------------------------------------------------------------- órdenes
+@app.get("/v1/ordenes")
+def listar_ordenes(usuario_externo: str, x_cliente: str | None = Header(default=None)):
+    cliente = cliente_del_pedido(x_cliente)
+    return {"cliente": cliente, "ordenes": reservas.ordenes_de_usuario(cliente, usuario_externo)}
+
+
+@app.get("/v1/ordenes/{orden_id}")
+def ver_orden(orden_id: uuid.UUID, x_cliente: str | None = Header(default=None)):
+    return reservas.buscar_orden(cliente_del_pedido(x_cliente), orden_id)
+
+
+# --------------------------------------------------------------------------- checkout (forma A)
 @app.get("/checkout/{sesion_id}", response_class=HTMLResponse)
 def checkout(sesion_id: uuid.UUID, x_cliente: str | None = Header(default=None)):
     cliente = cliente_del_pedido(x_cliente)
     sesion = buscar_sesion(sesion_id, cliente)
     if sesion is None:
         return HTMLResponse(pagina_checkout(cliente, None), status_code=404)
-    return pagina_checkout(cliente, sesion)
+    reserva, orden = reservas.compra_de_la_sesion(sesion_id)
+    return pagina_checkout(cliente, sesion, reserva, orden)

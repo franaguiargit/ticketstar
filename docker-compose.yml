@@ -26,7 +26,7 @@ services:
           - club-atletico.ticketstar.localhost
     restart: unless-stopped
 
-  # Cartelera de cada cliente: eventos y funciones.
+  # Cartelera de cada cliente: eventos, funciones y cómo es cada sala.
   eventos:
     build: ./servicios/eventos
     environment:
@@ -38,12 +38,34 @@ services:
       - interna
     restart: unless-stopped
 
-  # Sesiones de compra y checkout (más adelante: reservas y órdenes).
+  # La compra: sesiones, reserva de butacas, órdenes y checkout.
+  # Le pregunta a eventos por REST y deja avisos en RabbitMQ.
   ordenes:
     build: ./servicios/ordenes
     environment:
       DATABASE_URL: postgresql://ticketstar:ticketstar@postgres:5432/ticketstar
       URL_PUBLICA: "http://{cliente}.ticketstar.localhost:${PUERTO_GATEWAY:-80}"
+      EVENTOS_URL: http://eventos:8000
+      RABBITMQ_URL: amqp://ticketstar:ticketstar@rabbitmq:5672/
+      # Cuánto dura una reserva sin pagar antes de soltar las butacas (10 minutos)
+      SEGUNDOS_RESERVA: "${SEGUNDOS_RESERVA:-600}"
+      # Solo para la demo de concurrencia (ver pruebas/README.md). Normalmente en 0.
+      RESERVA_SIN_CONTROL: "${RESERVA_SIN_CONTROL:-0}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - interna
+    restart: unless-stopped
+
+  # Escucha la cola y manda los mails. No tiene API ni puertos.
+  notificaciones:
+    build: ./servicios/notificaciones
+    environment:
+      DATABASE_URL: postgresql://ticketstar:ticketstar@postgres:5432/ticketstar
+      RABBITMQ_URL: amqp://ticketstar:ticketstar@rabbitmq:5672/
+      SMTP_HOST: mail
+      SMTP_PORT: "1025"
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,6 +90,34 @@ services:
       - interna
     restart: unless-stopped
 
+  # La cola de mensajes entre nuestros servicios. El puerto 15672 es la consola
+  # web para mirar las colas (usuario y clave: ticketstar). Solo se abre en esta
+  # máquina (127.0.0.1) y no es una entrada al sistema.
+  rabbitmq:
+    image: rabbitmq:4.3-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ticketstar
+      RABBITMQ_DEFAULT_PASS: ticketstar
+    ports:
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - datos-rabbitmq:/var/lib/rabbitmq
+    networks:
+      - interna
+    restart: unless-stopped
+
+  # Casilla de mail de prueba (Mailpit). Hace de "servidor de mail de afuera":
+  # recibe lo que manda notificaciones y lo muestra en http://localhost:8025.
+  # No es parte de nuestro sistema, en producción iría un servidor de mail real.
+  mail:
+    image: axllent/mailpit:v1.31
+    ports:
+      - "127.0.0.1:8025:8025"
+    networks:
+      - interna
+    restart: unless-stopped
+
 networks:
   # Red privada: acá se hablan nuestros servicios. Desde afuera no se ve.
   interna: {}
@@ -77,3 +127,4 @@ networks:
 
 volumes:
   datos-postgres: {}
+  datos-rabbitmq: {}

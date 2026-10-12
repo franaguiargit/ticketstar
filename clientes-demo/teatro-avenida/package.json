@@ -1,6 +1,6 @@
 {
   "name": "teatro-avenida",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Sitio de prueba de un cliente de TicketStar (forma A: checkout alojado por TicketStar)",
   "main": "server.js",

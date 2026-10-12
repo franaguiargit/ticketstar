@@ -66,12 +66,14 @@ function pagina(titulo, contenido) {
   .lugar { color: #777; font-size: 14px; margin: 0 0 8px; }
   .funciones { font-size: 14px; margin: 6px 0 10px; }
   button { background: #6d1a1a; color: #fff; border: 0; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  header a { color: #fff; }
+  .total { float: right; font-weight: bold; }
   .aviso { background: #fff3cd; border: 1px solid #e0c36a; padding: 12px 14px; border-radius: 6px; }
   footer { text-align: center; font-size: 12px; color: #888; margin: 30px 0; }
 </style>
 </head>
 <body>
-<header><h1>Teatro Avenida</h1><p>Hola, ${escapar(USUARIO.nombre)} · Mi cuenta</p></header>
+<header><h1>Teatro Avenida</h1><p>Hola, ${escapar(USUARIO.nombre)} · <a href="/">Cartelera</a> · <a href="/mis-entradas">Mis entradas</a></p></header>
 <main>${contenido}</main>
 <footer>Venta de entradas powered by TicketStar</footer>
 </body>
@@ -99,6 +101,25 @@ async function paginaCartelera() {
   return pagina("Teatro Avenida", contenido);
 }
 
+// Las compras de nuestro usuario. No las guardamos nosotros: se las pedimos a TicketStar
+async function paginaMisEntradas() {
+  let contenido;
+  try {
+    const { ordenes } = await llamarTicketStar("GET", "/v1/ordenes?usuario_externo=" + encodeURIComponent(USUARIO.id));
+    contenido = "<h2>Mis entradas</h2>" + (ordenes.length ? ordenes.map((orden) => `
+      <div class="evento">
+        <span class="total">$${Number(orden.total).toLocaleString("es-AR")}</span>
+        <h3>${escapar(orden.evento)}</h3>
+        <p class="lugar">${escapar(orden.lugar)} · ${formatearFecha(orden.fecha)}</p>
+        <div class="funciones">Butacas: ${orden.butacas.map(escapar).join(", ")} · Compra ${escapar(orden.codigo)}</div>
+      </div>`).join("") : "<p>Todavía no compraste entradas.</p>");
+  } catch (error) {
+    contenido = `<p class="aviso">No pudimos cargar tus entradas (${escapar(error.message)}).
+      Probá de nuevo en un rato.</p>`;
+  }
+  return pagina("Mis entradas - Teatro Avenida", contenido + '<p><a href="/">Volver a la cartelera</a></p>');
+}
+
 function leerFormulario(req) {
   return new Promise((resolve, reject) => {
     let cuerpo = "";
@@ -124,10 +145,12 @@ const servidor = http.createServer(async (req, res) => {
         usuario_externo: USUARIO.id,
         email: USUARIO.email,
         evento_id: Number(formulario.get("evento_id")) || null,
-        url_retorno: URL_SITIO + "/",
+        url_retorno: URL_SITIO + "/mis-entradas",
       });
       res.writeHead(303, { Location: sesion.url_checkout });
       res.end();
+    } else if (req.method === "GET" && req.url === "/mis-entradas") {
+      responder(res, 200, await paginaMisEntradas());
     } else if (req.method === "GET" && req.url === "/salud") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ sitio: "teatro-avenida", estado: "ok" }));
